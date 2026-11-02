@@ -2,30 +2,51 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Redirects Notepad (classic notepad.exe AND the Windows 11 Store Notepad) to Notepad++
-    using the Image File Execution Options "Debugger" value.
+    Redirects Notepad (classic notepad.exe AND the Windows 11 Store Notepad) to Notepad++ or another
+    editor, using the Image File Execution Options "Debugger" value.
 
 .DESCRIPTION
     - Installs bin\npp-shim.exe to "%ProgramFiles%\NotepadWin11Replacement" (admin-only writable).
     - Backs up the IFEO\notepad.exe keys (64- and 32-bit views) to %ProgramData%\NotepadWin11Replacement.
     - Sets IFEO\notepad.exe\Debugger to the shim in both views. Windows' own AppExecutionAliasRedirect
       subkeys (0, 1, 2) are left untouched.
+    - Stores the chosen editor in HKLM\SOFTWARE\NotepadWin11Replacement (read by the shim on every launch).
     IFEO matches by file name, so the value covers System32/SysWOW64/Windows notepad.exe and the
     Store app's ...\WindowsApps\Microsoft.WindowsNotepad_*\Notepad\Notepad.exe.
+    Re-run with a different -Editor to switch editors; everything else is idempotent.
 
-.PARAMETER NppPath
-    Path to notepad++.exe. Defaults to the standard install location.
+.PARAMETER Editor
+    NotepadPlusPlus (default), VSCode, SublimeText, Notepad3, or Custom (requires -EditorPath).
+    Presets look for the editor in its usual install folders.
+
+.PARAMETER EditorPath
+    Full path to the editor executable. Overrides the preset's search. Alias: -NppPath.
+
+.PARAMETER EditorArgs
+    Argument template used when a file is opened. {file} becomes the quoted full path. Default from the preset, else "{file}".
+
+.PARAMETER EditorPrintArgs
+    Argument template for Notepad's /p and /pt (print). Default from the preset; when empty the file is just opened.
 
 .PARAMETER RemoveStoreNotepad
     Also uninstalls the Store Notepad for all users and deprovisions it for new users.
     Use only if Test.ps1 -Suite Routes shows the Store app bypassing the redirect.
+
+.EXAMPLE
+    .\Install.ps1 -Editor VSCode
+.EXAMPLE
+    .\Install.ps1 -Editor Custom -EditorPath 'C:\Tools\micro\micro.exe' -EditorArgs '{file}'
 #>
 [CmdletBinding()]
 param(
-    [string]$NppPath = (Join-Path $env:ProgramFiles 'Notepad++\notepad++.exe'),
+    [ValidateSet('NotepadPlusPlus', 'VSCode', 'SublimeText', 'Notepad3', 'Custom')]
+    [string]$Editor = 'NotepadPlusPlus',
+    [Alias('NppPath')]
+    [string]$EditorPath,
+    [string]$EditorArgs,
+    [string]$EditorPrintArgs,
     [switch]$RemoveStoreNotepad
-)
-$ErrorActionPreference = 'Stop'
+)$ErrorActionPreference = 'Stop'
 
 $ifeoViews = @(
     'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\notepad.exe'
@@ -37,7 +58,37 @@ $configKey = 'HKLM:\SOFTWARE\NotepadWin11Replacement'
 $shimTarget = Join-Path $installDir 'npp-shim.exe'
 $debugger = "`"$shimTarget`""
 
-if (-not (Test-Path $NppPath)) { throw "Notepad++ not found at '$NppPath'. Pass -NppPath." }
+# 0. Resolve the editor
+$presets = @{
+    NotepadPlusPlus = @{ Name = 'Notepad++'; Args = '{file}'; PrintArgs = '-quickPrint {file}'
+                         Paths = @("$env:ProgramFiles\Notepad++\notepad++.exe", "${env:ProgramFiles(x86)}\Notepad++\notepad++.exe") }
+    VSCode          = @{ Name = 'Visual Studio Code'; Args = '{file}'; PrintArgs = ''
+                         Paths = @("$env:ProgramFiles\Microsoft VS Code\Code.exe", "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe") }
+    SublimeText     = @{ Name = 'Sublime Text'; Args = '{file}'; PrintArgs = ''
+                         Paths = @("$env:ProgramFiles\Sublime Text\sublime_text.exe", "$env:ProgramFiles\Sublime Text 3\sublime_text.exe") }
+    Notepad3        = @{ Name = 'Notepad3'; Args = '{file}'; PrintArgs = '/p {file}'
+                         Paths = @("$env:ProgramFiles\Notepad3\Notepad3.exe", "${env:ProgramFiles(x86)}\Notepad3\Notepad3.exe") }
+    Custom          = @{ Name = 'Custom editor'; Args = '{file}'; PrintArgs = ''; Paths = @() }
+}
+$preset = $presets[$Editor]
+if (-not $EditorPath) {
+    $EditorPath = $preset.Paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    if (-not $EditorPath) {
+        if ($Editor -eq 'Custom') { throw '-Editor Custom requires -EditorPath.' }
+        throw "$($preset.Name) not found in: $($preset.Paths -join '; '). Pass -EditorPath."
+    }
+}
+if (-not (Test-Path $EditorPath -PathType Leaf)) { throw "Editor not found at '$EditorPath'." }
+$EditorPath = (Resolve-Path $EditorPath).Path
+if ((Split-Path $EditorPath -Leaf) -eq 'notepad.exe') {
+    throw 'The editor cannot be a notepad.exe: the IFEO redirect would send it straight back to the shim.'
+}
+if (-not $PSBoundParameters.ContainsKey('EditorArgs')) { $EditorArgs = $preset.Args }
+if (-not $PSBoundParameters.ContainsKey('EditorPrintArgs')) { $EditorPrintArgs = $preset.PrintArgs }
+if ($EditorArgs -notlike '*{file}*') { Write-Warning "-EditorArgs has no {file} placeholder; the file name will not be passed." }
+if ($EditorPath -like "$env:SystemDrive\Users\*") {
+    Write-Warning "$EditorPath is a per-user install; other users on this PC will get an 'editor not found' error."
+}
 
 # 1. Build (if needed) and install the shim
 $shimSource = Join-Path $PSScriptRoot 'bin\npp-shim.exe'
@@ -64,8 +115,14 @@ if (-not (Test-Path $backup)) {
 }
 
 # 3. Remember config (and any third-party Debugger we are replacing) for the shim and uninstaller
-New-Item -Path $configKey -Force | Out-Null
-Set-ItemProperty $configKey -Name NotepadPlusPlusPath -Value $NppPath
+# Not New-Item -Force on an existing key: that recreates it and drops RemovedStoreNotepad / PreviousDebugger*.
+if (-not (Test-Path $configKey)) { New-Item -Path $configKey | Out-Null }
+Set-ItemProperty $configKey -Name EditorName -Value $preset.Name
+Set-ItemProperty $configKey -Name EditorPath -Value $EditorPath
+Set-ItemProperty $configKey -Name EditorArgs -Value $EditorArgs
+Set-ItemProperty $configKey -Name EditorPrintArgs -Value ([string]$EditorPrintArgs)
+Remove-ItemProperty $configKey -Name NotepadPlusPlusPath -ErrorAction SilentlyContinue # pre-1.1 setting
+Write-Host "Editor: $($preset.Name) ($EditorPath $EditorArgs)"
 foreach ($view in $ifeoViews) {
     $prev = (Get-ItemProperty $view -Name Debugger -ErrorAction SilentlyContinue).Debugger
     $name = if ($view -like '*WOW6432Node*') { 'PreviousDebugger32' } else { 'PreviousDebugger64' }
@@ -105,7 +162,7 @@ Write-Host @"
 Next steps:
   * Run  .\Test.ps1 -Suite Routes  (non-elevated) to check every launch path.
   * If routes C/D still open the Store Notepad, either re-run with -RemoveStoreNotepad, or set
-    Notepad++ as default for .txt/.log/.ini in Settings > Apps > Default apps, and turn off the
+    the editor as default for .txt/.log/.ini in Settings > Apps > Default apps, and turn off the
     'Notepad' entry in Settings > Apps > Advanced app settings > App execution aliases.
   * Shim log: %LOCALAPPDATA%\NotepadWin11Replacement\shim.log
 "@

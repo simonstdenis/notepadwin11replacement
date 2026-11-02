@@ -1,15 +1,15 @@
 # NotepadWin11Replacement
 
-Makes every Notepad launch on Windows 11 open **Notepad++**, like the classic
+Makes every Notepad launch on Windows 11 open **Notepad++** (or another editor of your choice), like the classic
 `Image File Execution Options\notepad.exe\Debugger` trick, including the Store (modern) Notepad.
 
 ## How it works
 
 | Launch route | Mechanism |
 |---|---|
-| `notepad`, `notepad.exe`, System32 / SysWOW64 / Windows paths, "Edit" context menus | IFEO `Debugger` → `npp-shim.exe` → Notepad++ |
+| `notepad`, `notepad.exe`, System32 / SysWOW64 / Windows paths, "Edit" context menus | IFEO `Debugger` → `npp-shim.exe` → configured editor |
 | Store Notepad (alias, Start menu, AppX file associations) | Packaged activation **ignores IFEO**, so the Store app is removed (`-RemoveStoreNotepad`) |
-| Double-click `.txt` / `.log` / `.ini` | Default app set to Notepad++ (manual, see below) |
+| Double-click `.txt` / `.log` / `.ini` | Default app set to the editor (manual, see below) |
 
 Windows 11 itself uses `IFEO\notepad.exe\0|1|2` (`AppExecutionAliasRedirect`) to send classic
 `notepad.exe` launches to the Store app. Those subkeys are never modified; the `Debugger` value is
@@ -17,7 +17,7 @@ evaluated first.
 
 `npp-shim.exe` (built from `src\NppShim.cs`) drops the original notepad image path from the command
 line, applies Notepad's rules (rest of line = one file name, spaces allowed), maps `/p` and `/pt` to
-`-quickPrint`, drops `/A` and `/W`, and resolves relative paths. Every call is logged to
+the editor's print arguments (Notepad++ `-quickPrint`), drops `/A` and `/W`, and resolves relative paths. Every call is logged to
 `%LOCALAPPDATA%\NotepadWin11Replacement\shim.log`.
 
 ## Usage
@@ -29,9 +29,34 @@ line, applies Notepad's rules (rest of line = one file name, spaces allowed), ma
 .\Uninstall.ps1                            # elevated; Store Notepad: winget install 9MSMLRH6LZF3 --source msstore
 ```
 
+## Choosing another editor
+
+Re-run `Install.ps1` (elevated) with `-Editor` to switch. Nothing else changes.
+
+| `-Editor` | Looks in | Open args | Print (`/p`) args |
+|---|---|---|---|
+| `NotepadPlusPlus` (default) | `Program Files\Notepad++`, `Program Files (x86)\Notepad++` | `{file}` | `-quickPrint {file}` |
+| `VSCode` | `Program Files\Microsoft VS Code`, `%LOCALAPPDATA%\Programs\Microsoft VS Code` | `{file}` | opens the file |
+| `SublimeText` | `Program Files\Sublime Text`, `Program Files\Sublime Text 3` | `{file}` | opens the file |
+| `Notepad3` | `Program Files\Notepad3`, `Program Files (x86)\Notepad3` | `{file}` | `/p {file}` |
+| `Custom` | `-EditorPath` (required) | `{file}` | opens the file |
+
+`-EditorPath`, `-EditorArgs` and `-EditorPrintArgs` override any preset. `{file}` becomes the quoted
+full path. `-NppPath` still works as an alias of `-EditorPath`.
+
+```powershell
+.\Install.ps1 -Editor VSCode
+.\Install.ps1 -Editor Custom -EditorPath 'C:\Tools\micro\micro.exe' -EditorArgs '{file}'
+```
+
+The settings are stored in `HKLM\SOFTWARE\NotepadWin11Replacement` (`EditorPath`, `EditorArgs`,
+`EditorPrintArgs`, and optionally `EditorNoFileArgs` for launches without a file) and are read on every launch.
+Install refuses an editor named `notepad.exe`, because the redirect would loop back to itself.
+Editors installed per user (for example VS Code's user installer) only work for that user.
+
 After removing the Store app, the `.txt`/`.log`/`.ini` defaults still point at it, and Windows
-protects that choice with a hash so scripts can't change it. Set Notepad++ once in
-**Settings › Apps › Default apps › Notepad++**, or pick it with "Always" in the "Open with" dialog.
+protects that choice with a hash so scripts can't change it. Set your editor once in
+**Settings › Apps › Default apps**, or pick it with "Always" in the "Open with" dialog.
 
 `Install.ps1` also registers the `NotepadWin11Replacement-Repair` scheduled task (SYSTEM, at startup +
 daily). It puts the `Debugger` value back and removes the Store app again if an update restores either
@@ -44,4 +69,4 @@ Installed files: `%ProgramFiles%\NotepadWin11Replacement\`. Original IFEO backup
 
 - Security products may flag an IFEO `Debugger` value, because malware uses it for persistence (MITRE T1546.012).
 - Programs that start `notepad.exe` and wait for it to close (some installers, `git` set up with
-  `core.editor=notepad`) continue right away, because the shim hands off to Notepad++ and exits.
+  `core.editor=notepad`) continue right away, because the shim hands off to the editor and exits.

@@ -1,7 +1,14 @@
 // npp-shim: registered as the IFEO "Debugger" for notepad.exe.
 // Windows launches it as:  npp-shim.exe <original notepad command line>
 // It drops the original notepad image token, translates Notepad switches,
-// and opens the file in Notepad++.
+// and opens the file in the configured editor (Notepad++ by default).
+//
+// Configuration (HKLM\SOFTWARE\NotepadWin11Replacement, written by Install.ps1):
+//   EditorPath       full path to the editor executable
+//   EditorArgs       argument template when a file is given, "{file}" = quoted full path (default: {file})
+//   EditorPrintArgs  argument template for /p and /pt (default: EditorArgs, i.e. just open the file)
+//   EditorNoFileArgs arguments when Notepad was started without a file (default: none)
+// Installs from before EditorPath existed only have NotepadPlusPlusPath; that still works.
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -9,19 +16,26 @@ using System.Text;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: System.Reflection.AssemblyTitle("Notepad -> Notepad++ redirector")]
-[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
+[assembly: System.Reflection.AssemblyTitle("Notepad -> alternative editor redirector")]
+[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
 
 static class NppShim
 {
     const string ConfigKey = @"SOFTWARE\NotepadWin11Replacement";
     const string DefaultNpp = @"C:\Program Files\Notepad++\notepad++.exe";
 
+    class EditorConfig
+    {
+        public string Path;
+        public string Args = "{file}";
+        public string PrintArgs;
+        public string NoFileArgs = "";
+    }
+
     [STAThread]
     static int Main()
     {
         string raw = Environment.CommandLine;
-        string nppArgs = "";
         try
         {
             int i = 0;
@@ -29,22 +43,31 @@ static class NppShim
             string original = SkipToken(raw, ref i); // notepad.exe / WindowsApps\...\Notepad.exe
             string rest = raw.Substring(Math.Min(i, raw.Length)).Trim();
 
-            nppArgs = BuildNppArgs(rest);
-            string npp = GetNppPath();
-            Log(raw, original, npp + " " + nppArgs);
+            bool dryRun = Environment.GetEnvironmentVariable("NPP_SHIM_DRYRUN") == "1";
+            EditorConfig editor = LoadConfig(dryRun);
 
-            if (Environment.GetEnvironmentVariable("NPP_SHIM_DRYRUN") == "1")
+            bool print;
+            string file = ParseNotepadArgs(rest, out print);
+            string args = BuildEditorArgs(editor, file, print);
+            Log(raw, original, editor.Path, args);
+
+            if (dryRun)
                 return 0;
 
-            if (!File.Exists(npp))
+            // The editor must never be notepad.exe: IFEO would send it straight back here.
+            if (string.Equals(Path.GetFileName(editor.Path), "notepad.exe", StringComparison.OrdinalIgnoreCase))
             {
-                MessageBox.Show("Notepad++ was not found at:\n" + npp +
-                    "\n\nReinstall Notepad++ or run Uninstall.ps1.", "Notepad redirect",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ShowError("The configured editor is notepad.exe, which would loop back to this redirector:\n" + editor.Path);
+                return 3;
+            }
+            if (!File.Exists(editor.Path))
+            {
+                ShowError("The configured editor was not found:\n" + editor.Path +
+                    "\n\nReinstall it, re-run Install.ps1 -Editor ..., or run Uninstall.ps1.");
                 return 2;
             }
 
-            var psi = new ProcessStartInfo(npp, nppArgs);
+            var psi = new ProcessStartInfo(editor.Path, args);
             psi.UseShellExecute = false;
             psi.WorkingDirectory = Environment.CurrentDirectory;
             Process.Start(psi);
@@ -52,16 +75,16 @@ static class NppShim
         }
         catch (Exception ex)
         {
-            Log(raw, "", "ERROR " + ex);
+            Log(raw, "", "", "ERROR " + ex);
             return 1;
         }
     }
 
     // Notepad semantics: optional switches, then everything left is ONE file name
-    // (spaces allowed without quotes).
-    static string BuildNppArgs(string rest)
+    // (spaces allowed without quotes). Returns "" when no file was given.
+    static string ParseNotepadArgs(string rest, out bool print)
     {
-        bool print = false;
+        print = false;
         while (rest.Length > 0)
         {
             string sw = PeekSwitch(rest);
@@ -87,8 +110,61 @@ static class NppShim
         if (file.Length == 0) return "";
 
         try { file = Path.GetFullPath(file); } catch { /* keep as given */ }
-        string quoted = "\"" + file + "\"";
-        return print ? "-quickPrint " + quoted : quoted;
+        return file;
+    }
+
+    static string BuildEditorArgs(EditorConfig editor, string file, bool print)
+    {
+        if (file.Length == 0) return editor.NoFileArgs;
+        string template = print && !string.IsNullOrEmpty(editor.PrintArgs) ? editor.PrintArgs : editor.Args;
+        return template.Replace("{file}", "\"" + file + "\"").Trim();
+    }
+
+    static EditorConfig LoadConfig(bool dryRun)
+    {
+        var cfg = new EditorConfig();
+
+        // Test hook (Test.ps1): dry-run never launches anything, so the editor may come from the
+        // environment instead of the registry. Unset variables keep the built-in defaults.
+        string testPath = Environment.GetEnvironmentVariable("NPP_SHIM_EDITOR_PATH");
+        if (dryRun && testPath != null)
+        {
+            cfg.Path = testPath;
+            cfg.Args = Environment.GetEnvironmentVariable("NPP_SHIM_EDITOR_ARGS") ?? cfg.Args;
+            cfg.PrintArgs = Environment.GetEnvironmentVariable("NPP_SHIM_EDITOR_PRINTARGS");
+            cfg.NoFileArgs = Environment.GetEnvironmentVariable("NPP_SHIM_EDITOR_NOFILEARGS") ?? cfg.NoFileArgs;
+            return cfg;
+        }
+
+        using (var k = Registry.LocalMachine.OpenSubKey(ConfigKey))
+        {
+            string path = Get(k, "EditorPath");
+            if (path != null)
+            {
+                cfg.Path = path;
+                cfg.Args = Get(k, "EditorArgs") ?? cfg.Args;
+                cfg.PrintArgs = Get(k, "EditorPrintArgs");
+                cfg.NoFileArgs = Get(k, "EditorNoFileArgs") ?? cfg.NoFileArgs;
+            }
+            else
+            {
+                // Pre-1.1 install: Notepad++ only.
+                cfg.Path = Get(k, "NotepadPlusPlusPath") ?? DefaultNpp;
+                cfg.PrintArgs = "-quickPrint {file}";
+            }
+        }
+        return cfg;
+    }
+
+    static string Get(RegistryKey k, string name)
+    {
+        var v = k == null ? null : k.GetValue(name) as string;
+        return string.IsNullOrEmpty(v) ? null : v;
+    }
+
+    static void ShowError(string message)
+    {
+        MessageBox.Show(message, "Notepad redirect", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     static string PeekSwitch(string s)
@@ -116,16 +192,7 @@ static class NppShim
         return s.Substring(start, i - start);
     }
 
-    static string GetNppPath()
-    {
-        using (var k = Registry.LocalMachine.OpenSubKey(ConfigKey))
-        {
-            var v = k == null ? null : k.GetValue("NotepadPlusPlusPath") as string;
-            return string.IsNullOrEmpty(v) ? DefaultNpp : v;
-        }
-    }
-
-    static void Log(string raw, string original, string launched)
+    static void Log(string raw, string original, string editor, string args)
     {
         try
         {
@@ -138,8 +205,8 @@ static class NppShim
                 File.Copy(log, log + ".old", true);
                 File.Delete(log);
             }
-            File.AppendAllText(log, string.Format("{0:o}\traw={1}\toriginal={2}\tlaunch={3}{4}",
-                DateTime.Now, raw, original, launched, Environment.NewLine), Encoding.UTF8);
+            File.AppendAllText(log, string.Format("{0:o}\traw={1}\toriginal={2}\teditor={3}\targs={4}{5}",
+                DateTime.Now, raw, original, editor, args, Environment.NewLine), Encoding.UTF8);
         }
         catch { }
     }
