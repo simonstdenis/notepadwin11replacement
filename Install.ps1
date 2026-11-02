@@ -45,8 +45,10 @@ param(
     [string]$EditorPath,
     [string]$EditorArgs,
     [string]$EditorPrintArgs,
-    [switch]$RemoveStoreNotepad
-)$ErrorActionPreference = 'Stop'
+    [switch]$RemoveStoreNotepad,
+    [switch]$ListEditors
+)
+$ErrorActionPreference = 'Stop'
 
 $ifeoViews = @(
     'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\notepad.exe'
@@ -59,7 +61,7 @@ $shimTarget = Join-Path $installDir 'npp-shim.exe'
 $debugger = "`"$shimTarget`""
 
 # 0. Resolve the editor
-$presets = @{
+$presets = [ordered]@{
     NotepadPlusPlus = @{ Name = 'Notepad++'; Args = '{file}'; PrintArgs = '-quickPrint {file}'
                          Paths = @("$env:ProgramFiles\Notepad++\notepad++.exe", "${env:ProgramFiles(x86)}\Notepad++\notepad++.exe") }
     VSCode          = @{ Name = 'Visual Studio Code'; Args = '{file}'; PrintArgs = ''
@@ -69,6 +71,14 @@ $presets = @{
     Notepad3        = @{ Name = 'Notepad3'; Args = '{file}'; PrintArgs = '/p {file}'
                          Paths = @("$env:ProgramFiles\Notepad3\Notepad3.exe", "${env:ProgramFiles(x86)}\Notepad3\Notepad3.exe") }
     Custom          = @{ Name = 'Custom editor'; Args = '{file}'; PrintArgs = ''; Paths = @() }
+}
+if ($ListEditors) {
+    # Machine-readable for the setup exe: Key<TAB>Display name<TAB>Found path (empty if not installed)
+    foreach ($key in $presets.Keys) {
+        $found = $presets[$key].Paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+        Write-Output ("{0}`t{1}`t{2}" -f $key, $presets[$key].Name, $found)
+    }
+    return
 }
 $preset = $presets[$Editor]
 if (-not $EditorPath) {

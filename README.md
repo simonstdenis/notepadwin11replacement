@@ -3,6 +3,46 @@
 Makes every Notepad launch on Windows 11 open **Notepad++** (or another editor of your choice), like the classic
 `Image File Execution Options\notepad.exe\Debugger` trick, including the Store (modern) Notepad.
 
+## Quick install
+
+**One line** in PowerShell (asks for admin rights; installs Notepad++ as the editor and removes the Store Notepad):
+
+```powershell
+irm https://github.com/simonstdenis/notepadwin11replacement/releases/latest/download/install.ps1 | iex
+```
+
+With options (same names as `Install.ps1`, plus `-KeepStoreNotepad`, `-Uninstall`, `-Version v1.1.0`):
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/simonstdenis/notepadwin11replacement/releases/latest/download/install.ps1))) -Editor VSCode
+& ([scriptblock]::Create((irm https://github.com/simonstdenis/notepadwin11replacement/releases/latest/download/install.ps1))) -Uninstall
+```
+
+The script downloads `NotepadWin11Replacement.zip` from the release, checks it against
+`SHA256SUMS.txt`, and runs `Install.ps1` elevated.
+
+**Setup exe**: download `NotepadRedirect-Setup.exe` from the
+[latest release](https://github.com/simonstdenis/notepadwin11replacement/releases/latest) and run it.
+Without options it shows an editor menu.
+
+```text
+NotepadRedirect-Setup.exe --quiet                         # Notepad++, unattended (Intune / GPO / scripts)
+NotepadRedirect-Setup.exe --quiet --editor VSCode
+NotepadRedirect-Setup.exe --quiet --editor Custom --editor-path "C:\Tools\micro\micro.exe"
+NotepadRedirect-Setup.exe --quiet --keep-store-notepad
+NotepadRedirect-Setup.exe --uninstall --quiet
+```
+
+The exe is self-contained (it carries the release zip and runs the same scripts) and not code-signed,
+so SmartScreen may warn on first run ("More info" → "Run anyway").
+
+## Releasing
+
+Push a `v*` tag. `.github/workflows/release.yml` runs `Package.ps1`, the parsing tests and publishes
+`install.ps1`, `NotepadRedirect-Setup.exe`, `NotepadWin11Replacement.zip` and `SHA256SUMS.txt`.
+The asset names carry no version, so the `releases/latest/download/...` URLs above always point to
+the newest release. `.\Package.ps1 -Version 1.2.0` builds the same files locally into `dist\`.
+
 ## How it works
 
 | Launch route | Mechanism |
@@ -20,7 +60,7 @@ line, applies Notepad's rules (rest of line = one file name, spaces allowed), ma
 the editor's print arguments (Notepad++ `-quickPrint`), drops `/A` and `/W`, and resolves relative paths. Every call is logged to
 `%LOCALAPPDATA%\NotepadWin11Replacement\shim.log`.
 
-## Usage
+## Usage from a clone
 
 ```powershell
 .\Build.ps1                                # compile bin\npp-shim.exe (in-box csc.exe)
